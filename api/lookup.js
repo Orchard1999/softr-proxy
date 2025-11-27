@@ -52,7 +52,7 @@ export default async function handler(req, res) {
             const code = record.fields[mapping['Product Code']];
             if (code) {
                 lookupMap[code.trim()] = {
-                    MOQ: record.fields[mapping['MOQ']] || 0,
+                    MOQ: record.fields[mapping['Minimum Order Quantity']] || 0,
                     OrderMultiple: record.fields[mapping['Order Multiple']] || 1,
                     PiecesPerBox: record.fields[mapping['Pieces Per Box']] || 0
                 };
