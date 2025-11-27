@@ -1,0 +1,10 @@
+{
+  "name": "softr-proxy",
+  "version": "1.0.0",
+  "description": "Proxy API for Softr to bypass CORS",
+  "main": "api/products.js",
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "dependencies": {}
+}
