@@ -1,9 +1,5 @@
 {
   "version": 2,
-  "env": {
-    "SOFTR_API_KEY": "@softr-api-key",
-    "SOFTR_DATABASE_ID": "@softr-database-id"
-  },
   "headers": [
     {
       "source": "/api/(.*)",
