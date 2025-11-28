@@ -6,7 +6,7 @@
       "headers": [
         {
           "key": "Access-Control-Allow-Origin",
-          "value": "https://orders.orchard-melamine.co.uk"
+          "value": "*"
         },
         {
           "key": "Access-Control-Allow-Methods",
