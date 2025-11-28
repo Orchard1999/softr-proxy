@@ -1,4 +1,4 @@
-// Get line items for a specific order - DEBUG VERSION
+// Get line items for a specific order - FINAL FIXED VERSION
 export default async function handler(req, res) {
     // Handle CORS preflight
     if (req.method === 'OPTIONS') {
@@ -17,93 +17,10 @@ export default async function handler(req, res) {
             return;
         }
 
-        console.log('🔍 DEBUG: Fetching line items for order:', orderId);
+        console.log('Fetching line items for order:', orderId);
 
-        // STEP 1: Get the order first to find its line item IDs
-        console.log('🔍 Step 1: Fetching order schema...');
-        const orderSchemaResponse = await fetch(
-            `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/67HNjrAhYDgbOD`,
-            {
-                headers: {
-                    'Softr-Api-Key': process.env.SOFTR_API_KEY
-                }
-            }
-        );
-
-        if (!orderSchemaResponse.ok) {
-            throw new Error('Failed to fetch order schema');
-        }
-
-        const orderSchemaData = await orderSchemaResponse.json();
-        const orderFields = orderSchemaData.data.fields || [];
-        
-        const orderMapping = {};
-        orderFields.forEach(field => {
-            orderMapping[field.name] = field.id;
-        });
-
-        console.log('📋 Order field mapping:', orderMapping);
-
-        // Get the specific order
-        console.log('🔍 Step 2: Fetching order record...');
-        const orderResponse = await fetch(
-            `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/67HNjrAhYDgbOD/records/${orderId}`,
-            {
-                headers: {
-                    'Softr-Api-Key': process.env.SOFTR_API_KEY
-                }
-            }
-        );
-
-        if (!orderResponse.ok) {
-            throw new Error('Failed to fetch order: ' + orderResponse.status);
-        }
-
-        const orderData = await orderResponse.json();
-        const order = orderData.data;
-
-        console.log('📦 Order data:', JSON.stringify(order, null, 2));
-
-        // Get the line item IDs from the order
-        const lineItemFieldId = orderMapping['Order Line Items'];
-        console.log('🔑 Line Item field ID:', lineItemFieldId);
-        
-        const rawLineItems = order.fields[lineItemFieldId];
-        console.log('📋 Raw line items value:', rawLineItems);
-
-        // Extract IDs from line items (could be array of objects or array of strings)
-        let lineItemIds = [];
-        if (Array.isArray(rawLineItems)) {
-            lineItemIds = rawLineItems.map(item => {
-                if (typeof item === 'string') {
-                    return item;
-                } else if (item && item.id) {
-                    return item.id;
-                }
-                return null;
-            }).filter(Boolean);
-        }
-
-        console.log('🎯 Extracted line item IDs:', lineItemIds);
-
-        if (lineItemIds.length === 0) {
-            console.log('⚠️ No line item IDs found!');
-            return res.status(200).json({
-                success: true,
-                data: [],
-                count: 0,
-                debug: {
-                    orderId: orderId,
-                    lineItemFieldId: lineItemFieldId,
-                    rawLineItems: rawLineItems,
-                    extractedIds: lineItemIds
-                }
-            });
-        }
-
-        // STEP 2: Get line items table schema
-        console.log('🔍 Step 3: Fetching line items schema...');
-        const lineItemSchemaResponse = await fetch(
+        // Get line items table schema
+        const schemaResponse = await fetch(
             `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/VaO5LhcCxcRAkP`,
             {
                 headers: {
@@ -112,89 +29,93 @@ export default async function handler(req, res) {
             }
         );
 
-        if (!lineItemSchemaResponse.ok) {
+        if (!schemaResponse.ok) {
             throw new Error('Failed to fetch line items schema');
         }
 
-        const lineItemSchemaData = await lineItemSchemaResponse.json();
-        const lineItemFields = lineItemSchemaData.data.fields || [];
+        const schemaData = await schemaResponse.json();
+        const fields = schemaData.data.fields || [];
         
-        const lineItemMapping = {};
-        lineItemFields.forEach(field => {
-            lineItemMapping[field.name] = field.id;
+        const mapping = {};
+        fields.forEach(field => {
+            mapping[field.name] = field.id;
         });
 
-        console.log('📋 Line item field mapping:', lineItemMapping);
-
-        // STEP 3: Fetch each line item by ID
-        console.log('🔍 Step 4: Fetching individual line items...');
-        const lineItems = [];
-        
-        for (const lineItemId of lineItemIds) {
-            console.log(`  → Fetching line item: ${lineItemId}`);
-            try {
-                const lineItemResponse = await fetch(
-                    `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/VaO5LhcCxcRAkP/records/${lineItemId}`,
-                    {
-                        headers: {
-                            'Softr-Api-Key': process.env.SOFTR_API_KEY
-                        }
-                    }
-                );
-
-                console.log(`  → Response status: ${lineItemResponse.status}`);
-
-                if (lineItemResponse.ok) {
-                    const lineItemData = await lineItemResponse.json();
-                    const record = lineItemData.data;
-                    
-                    console.log(`  → Line item data:`, JSON.stringify(record, null, 2));
-                    
-                    // Flatten the record
-                    const lineItem = { id: record.id };
-                    Object.entries(lineItemMapping).forEach(([name, id]) => {
-                        if (record.fields[id] !== undefined) {
-                            const value = record.fields[id];
-                            // Handle linked fields (arrays)
-                            if (Array.isArray(value) && value.length > 0) {
-                                lineItem[name] = value[0];
-                            } else {
-                                lineItem[name] = value;
-                            }
-                        }
-                    });
-                    
-                    console.log(`  ✅ Flattened line item:`, lineItem);
-                    lineItems.push(lineItem);
-                } else {
-                    console.warn(`  ⚠️ Failed to fetch line item ${lineItemId}: ${lineItemResponse.status}`);
+        // Fetch all line items
+        const lineItemsResponse = await fetch(
+            `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/VaO5LhcCxcRAkP/records?limit=3000`,
+            {
+                headers: {
+                    'Softr-Api-Key': process.env.SOFTR_API_KEY
                 }
-            } catch (err) {
-                console.error(`  ❌ Error fetching line item ${lineItemId}:`, err);
             }
+        );
+
+        if (!lineItemsResponse.ok) {
+            throw new Error('Failed to fetch line items');
         }
 
-        console.log(`✅ Final result: ${lineItems.length} line items`);
+        const lineItemsData = await lineItemsResponse.json();
+        const records = lineItemsData.data || [];
+
+        // Filter to this order's line items using the "Order ID" linked field
+        const orderIdFieldId = mapping['Order ID'];
+        
+        const orderLineItems = records.filter(record => {
+            const orderIdValue = record.fields[orderIdFieldId];
+            
+            // Handle linked field (array of IDs)
+            if (Array.isArray(orderIdValue)) {
+                return orderIdValue.includes(orderId);
+            }
+            // Handle string ID
+            return orderIdValue === orderId;
+        });
+
+        console.log(`✅ Found ${orderLineItems.length} line items for order ${orderId}`);
+
+        // Flatten the records with correct field mappings
+        const flattenedItems = orderLineItems.map(record => {
+            const lineItem = { id: record.id };
+            
+            // Map each field
+            Object.entries(mapping).forEach(([name, id]) => {
+                if (record.fields[id] !== undefined) {
+                    const value = record.fields[id];
+                    
+                    // Handle linked fields (arrays) - extract first value
+                    if (Array.isArray(value) && value.length > 0) {
+                        lineItem[name] = value[0];
+                    } else {
+                        lineItem[name] = value;
+                    }
+                }
+            });
+            
+            // Map "Backing" to "Backing" (in case of typo in column name)
+            if (record.fields[mapping['Backng']]) {
+                lineItem['Backing'] = record.fields[mapping['Backng']];
+            }
+            
+            // Map to frontend expected names
+            if (lineItem['Product Code']) {
+                lineItem['Design'] = lineItem['Design'] || lineItem['Product Code'];
+            }
+            
+            return lineItem;
+        });
 
         res.status(200).json({
             success: true,
-            data: lineItems,
-            count: lineItems.length,
-            debug: {
-                orderId: orderId,
-                lineItemFieldId: lineItemFieldId,
-                rawLineItems: rawLineItems,
-                extractedIds: lineItemIds,
-                fetchedCount: lineItems.length
-            }
+            data: flattenedItems,
+            count: flattenedItems.length
         });
 
     } catch (error) {
-        console.error('❌ Error fetching line items:', error);
+        console.error('Error fetching line items:', error);
         res.status(500).json({ 
             success: false,
-            error: error.message,
-            stack: error.stack
+            error: error.message 
         });
     }
 }
