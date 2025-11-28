@@ -1,4 +1,4 @@
-// Get line items for a specific order
+// Get line items for a specific order - SMART VERSION
 export default async function handler(req, res) {
     // Handle CORS preflight
     if (req.method === 'OPTIONS') {
@@ -7,17 +7,17 @@ export default async function handler(req, res) {
     }
 
     try {
-        const { orderId } = req.query;
+        const { orderId, orderNumber } = req.query;
 
-        if (!orderId) {
+        if (!orderId && !orderNumber) {
             res.status(400).json({ 
                 success: false, 
-                error: 'Order ID is required' 
+                error: 'Order ID or Order Number is required' 
             });
             return;
         }
 
-        console.log('Fetching line items for order:', orderId);
+        console.log('Fetching line items for:', { orderId, orderNumber });
 
         // Get table schema first
         const schemaResponse = await fetch(
@@ -58,39 +58,57 @@ export default async function handler(req, res) {
         const lineItemsData = await lineItemsResponse.json();
         const records = lineItemsData.data || [];
 
-        // Filter to this order's line items and flatten
+        // Try to match by Order ID first, then Order Number
         const orderIdFieldId = mapping['Order ID'];
-        const orderLineItems = records
-            .filter(record => {
-                const orderIdValue = record.fields[orderIdFieldId];
-                // Handle both string and array formats
-                if (Array.isArray(orderIdValue)) {
-                    return orderIdValue.includes(orderId);
-                }
-                return orderIdValue === orderId;
-            })
-            .map(record => {
-                const lineItem = { id: record.id };
-                Object.entries(mapping).forEach(([name, id]) => {
-                    if (record.fields[id] !== undefined) {
-                        // Handle linked fields (arrays)
-                        const value = record.fields[id];
-                        if (Array.isArray(value) && value.length > 0) {
-                            lineItem[name] = value[0]; // Take first value for linked fields
-                        } else {
-                            lineItem[name] = value;
-                        }
-                    }
-                });
-                return lineItem;
-            });
+        const orderNumberFieldId = mapping['Order Number'];
 
-        console.log(`✅ Found ${orderLineItems.length} line items for order ${orderId}`);
+        const orderLineItems = records.filter(record => {
+            // Try Order ID field (linked field - could be array or string)
+            if (orderId && orderIdFieldId) {
+                const orderIdValue = record.fields[orderIdFieldId];
+                if (Array.isArray(orderIdValue)) {
+                    if (orderIdValue.includes(orderId)) return true;
+                } else if (orderIdValue === orderId) {
+                    return true;
+                }
+            }
+            
+            // Try Order Number field (text field)
+            if (orderNumber && orderNumberFieldId) {
+                const orderNumValue = record.fields[orderNumberFieldId];
+                if (Array.isArray(orderNumValue)) {
+                    if (orderNumValue.includes(orderNumber)) return true;
+                } else if (orderNumValue === orderNumber) {
+                    return true;
+                }
+            }
+            
+            return false;
+        });
+
+        console.log(`✅ Found ${orderLineItems.length} line items`);
+
+        // Flatten the records
+        const flattenedItems = orderLineItems.map(record => {
+            const lineItem = { id: record.id };
+            Object.entries(mapping).forEach(([name, id]) => {
+                if (record.fields[id] !== undefined) {
+                    // Handle linked fields (arrays)
+                    const value = record.fields[id];
+                    if (Array.isArray(value) && value.length > 0) {
+                        lineItem[name] = value[0]; // Take first value for linked fields
+                    } else {
+                        lineItem[name] = value;
+                    }
+                }
+            });
+            return lineItem;
+        });
 
         res.status(200).json({
             success: true,
-            data: orderLineItems,
-            count: orderLineItems.length
+            data: flattenedItems,
+            count: flattenedItems.length
         });
 
     } catch (error) {
