@@ -1,4 +1,4 @@
-// Get orders by customer name - FIXED VERSION with correct field mappings
+// Get orders by customer name - FINAL FIXED VERSION
 export default async function handler(req, res) {
     // Handle CORS preflight
     if (req.method === 'OPTIONS') {
@@ -19,7 +19,7 @@ export default async function handler(req, res) {
 
         console.log('Fetching orders for customer:', customerName);
 
-        // Get table schema first
+        // Get table schema
         const schemaResponse = await fetch(
             `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/67HNjrAhYDgbOD`,
             {
@@ -58,49 +58,46 @@ export default async function handler(req, res) {
         const ordersData = await ordersResponse.json();
         const records = ordersData.data || [];
 
-        // Filter to customer's orders and flatten with correct field names
+        // Filter to customer's orders
         const customerNameFieldId = mapping['Customer Name'];
         const customerOrders = records
             .filter(record => record.fields[customerNameFieldId] === customerName)
             .map(record => {
                 const order = { id: record.id };
                 
-                // Map fields with correct names for frontend
+                // Map all fields with correct frontend names
                 Object.entries(mapping).forEach(([name, id]) => {
                     const value = record.fields[id];
                     
                     if (value !== undefined) {
-                        // Handle Status field (extract label)
-                        if (name === 'Status' && value && typeof value === 'object' && value.label) {
-                            order['Order Status'] = value.label;
-                        }
-                        // Map Order ID to Order Number
-                        else if (name === 'Order ID') {
-                            order['Order Number'] = value;
-                        }
-                        // Map Ship Address to Delivery Address
-                        else if (name === 'Ship Address') {
-                            order['Delivery Address'] = value;
-                        }
-                        // Map Total Value to Total Cost
-                        else if (name === 'Total Value') {
-                            order['Total Cost'] = value;
-                        }
-                        // Map Carriage to Carriage Cost
-                        else if (name === 'Carriage') {
-                            order['Carriage Cost'] = value;
-                        }
-                        // Map Required Delivery Date to Order Date (or keep both)
-                        else if (name === 'Order Date') {
-                            order['Order Date'] = value;
-                        }
-                        // Keep Customer Message as is
-                        else if (name === 'Customer Message') {
-                            order['Customer Message'] = value;
-                        }
-                        // Keep other fields with original names
-                        else {
-                            order[name] = value;
+                        // Map database field names to frontend expected names
+                        switch(name) {
+                            case 'Order ID':
+                                order['Order Number'] = value;
+                                break;
+                            case 'Status':
+                                // Extract label from Status object
+                                order['Order Status'] = (value && typeof value === 'object' && value.label) ? value.label : 'Pending';
+                                break;
+                            case 'Total Value':
+                                order['Total Cost'] = value;
+                                break;
+                            case 'Carriage':
+                                order['Carriage Cost'] = value;
+                                break;
+                            case 'Ship Address':
+                                order['Delivery Address'] = value;
+                                break;
+                            case 'Order Date':
+                            case 'Customer Message':
+                            case 'Customer Name':
+                                // Keep these as-is
+                                order[name] = value;
+                                break;
+                            default:
+                                // Keep all other fields
+                                order[name] = value;
+                                break;
                         }
                     }
                 });
