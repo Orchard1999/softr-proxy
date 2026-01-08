@@ -5,7 +5,6 @@ export default async function handler(req, res) {
         res.status(200).end();
         return;
     }
-
     try {
         // Get table schema
         const schemaResponse = await fetch(
@@ -16,11 +15,9 @@ export default async function handler(req, res) {
                 }
             }
         );
-
         if (!schemaResponse.ok) {
             throw new Error('Failed to fetch table schema');
         }
-
         const schemaData = await schemaResponse.json();
         const fields = schemaData.data.fields || [];
         
@@ -28,7 +25,6 @@ export default async function handler(req, res) {
         fields.forEach(field => {
             mapping[field.name] = field.id;
         });
-
         // Get all lookup records
         const lookupResponse = await fetch(
             `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/3nHzao5WHtnaay/records?limit=3000`,
@@ -38,14 +34,11 @@ export default async function handler(req, res) {
                 }
             }
         );
-
         if (!lookupResponse.ok) {
             throw new Error('Failed to fetch lookup data');
         }
-
         const lookupData = await lookupResponse.json();
         const lookupRecords = lookupData.data || [];
-
         // Transform to friendly format
         const lookupMap = {};
         lookupRecords.forEach(record => {
@@ -54,17 +47,18 @@ export default async function handler(req, res) {
                 lookupMap[code.trim()] = {
                     MOQ: record.fields[mapping['Minimum Order Quantity']] || 0,
                     OrderMultiple: record.fields[mapping['Order Multiple']] || 1,
-                    PiecesPerBox: record.fields[mapping['Pieces Per Box']] || 0
+                    PiecesPerBox: record.fields[mapping['Pieces Per Box']] || 0,
+                    'Sales Code': record.fields[mapping['Sales Code']] || '',
+                    JigID: record.fields[mapping['JigID']] || '',
+                    BackJigID: record.fields[mapping['BackJigID']] || ''
                 };
             }
         });
-
         res.status(200).json({
             success: true,
             data: lookupMap,
             count: Object.keys(lookupMap).length
         });
-
     } catch (error) {
         console.error('Error:', error);
         res.status(500).json({ 
