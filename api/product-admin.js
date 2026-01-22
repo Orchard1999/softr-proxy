@@ -175,7 +175,7 @@ async function addProduct(req, res, tableId) {
 // ============================================
 async function updateProduct(req, res, tableId) {
   const { id } = req.query;
-  const { Design } = req.body;
+  const { Design, 'Bespoke Backing': BespokeBacking } = req.body;
 
   if (!id) {
     return res.status(400).json({ success: false, error: 'Product ID is required' });
@@ -185,9 +185,13 @@ async function updateProduct(req, res, tableId) {
     return res.status(400).json({ success: false, error: 'Design name is required' });
   }
 
-  console.log('Updating product:', id, 'New design:', Design);
+  console.log('Updating product:', id);
+  console.log('New design:', Design);
+  if (BespokeBacking !== undefined) {
+    console.log('New bespoke backing:', BespokeBacking);
+  }
 
-  // Get table schema to find Design field ID
+  // Get table schema to find field IDs
   const schemaResponse = await fetch(
     `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${tableId}`,
     {
@@ -214,12 +218,17 @@ async function updateProduct(req, res, tableId) {
     throw new Error('Design field not found in table');
   }
 
-  // Update the record
-  const updateData = {
-    fields: {
-      [designFieldId]: Design.trim()
-    }
+  // Build update data
+  const updateFields = {
+    [designFieldId]: Design.trim()
   };
+
+  // Add Bespoke Backing if provided
+  if (BespokeBacking !== undefined && mapping['Bespoke Backing']) {
+    updateFields[mapping['Bespoke Backing']] = BespokeBacking.trim();
+  }
+
+  const updateData = { fields: updateFields };
 
   const updateResponse = await fetch(
     `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${tableId}/records/${id}`,
