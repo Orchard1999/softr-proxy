@@ -37,7 +37,7 @@ export default async function handler(req, res) {
 }
 
 // ============================================
-// ADD PRODUCT (POST)
+// ADD PRODUCT (POST) - Using Tables API
 // ============================================
 async function addProduct(req, res, tableId) {
   console.log('=== ADD PRODUCT REQUEST ===');
@@ -56,32 +56,33 @@ async function addProduct(req, res, tableId) {
     throw new Error('Design is required');
   }
 
-  // Get field IDs from Softr
-  console.log('Fetching field IDs...');
-  const fieldsResponse = await fetch(
-    `https://studio-api.softr.io/v1/api/databases/${process.env.SOFTR_DATABASE_ID}/collections/${tableId}/fields`,
+  // Get table schema to get field IDs (using Tables API)
+  console.log('Fetching field IDs from Tables API...');
+  const schemaResponse = await fetch(
+    `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${tableId}`,
     {
       headers: {
-        'Softr-Api-Key': process.env.SOFTR_API_KEY,
-        'Softr-Domain': 'customer.orchard-melamine.co.uk'
+        'Softr-Api-Key': process.env.SOFTR_API_KEY
       }
     }
   );
 
-  if (!fieldsResponse.ok) {
-    const errorText = await fieldsResponse.text();
-    console.error('Failed to get field IDs:', fieldsResponse.status, errorText);
-    throw new Error(`Failed to get field IDs: ${fieldsResponse.status}`);
+  if (!schemaResponse.ok) {
+    const errorText = await schemaResponse.text();
+    console.error('Failed to get schema:', schemaResponse.status, errorText);
+    throw new Error(`Failed to get field IDs: ${schemaResponse.status}`);
   }
 
-  const fields = await fieldsResponse.json();
-  console.log('✅ Got', fields.length, 'fields');
-
+  const schemaData = await schemaResponse.json();
+  const fields = schemaData.data.fields || [];
+  
   // Create field name to ID mapping
   const fieldMap = {};
   fields.forEach(field => {
-    fieldMap[field.name] = field.field_id;
+    fieldMap[field.name] = field.id;
   });
+
+  console.log('✅ Got field mapping:', Object.keys(fieldMap).length, 'fields');
 
   // Map incoming data to Softr field structure
   const softrRecord = {};
@@ -138,19 +139,18 @@ async function addProduct(req, res, tableId) {
     softrRecord[fieldMap['JoinedName']] = joinedParts.join('');
   }
 
-  console.log('Softr record to create:', JSON.stringify(softrRecord, null, 2));
+  console.log('Creating record with fields:', Object.keys(softrRecord).length);
 
-  // Create record in Softr
+  // Create record using Tables API
   const createResponse = await fetch(
-    `https://studio-api.softr.io/v1/api/databases/${process.env.SOFTR_DATABASE_ID}/collections/${tableId}/records`,
+    `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${tableId}/records`,
     {
       method: 'POST',
       headers: {
         'Softr-Api-Key': process.env.SOFTR_API_KEY,
-        'Softr-Domain': 'customer.orchard-melamine.co.uk',
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(softrRecord)
+      body: JSON.stringify({ fields: softrRecord })
     }
   );
 
@@ -161,7 +161,7 @@ async function addProduct(req, res, tableId) {
   }
 
   const createdRecord = await createResponse.json();
-  console.log('✅ Record created:', createdRecord);
+  console.log('✅ Product added successfully');
 
   return res.status(200).json({
     success: true,
@@ -224,7 +224,7 @@ async function updateProduct(req, res, tableId) {
   const updateResponse = await fetch(
     `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${tableId}/records/${id}`,
     {
-      method: 'PUT',
+      method: 'PATCH',
       headers: {
         'Softr-Api-Key': process.env.SOFTR_API_KEY,
         'Content-Type': 'application/json'
