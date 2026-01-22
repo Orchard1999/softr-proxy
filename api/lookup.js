@@ -1,10 +1,15 @@
 // Get lookup data (MOQ, Order Multiple, etc.)
+// Add ?full=true to get all fields (for product selector)
 export default async function handler(req, res) {
     // Handle CORS preflight
     if (req.method === 'OPTIONS') {
         res.status(200).end();
         return;
     }
+    
+    const { full } = req.query;
+    const returnFullData = full === 'true';
+    
     try {
         // Get table schema
         const schemaResponse = await fetch(
@@ -25,6 +30,7 @@ export default async function handler(req, res) {
         fields.forEach(field => {
             mapping[field.name] = field.id;
         });
+        
         // Get all lookup records
         const lookupResponse = await fetch(
             `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/3nHzao5WHtnaay/records?limit=3000`,
@@ -39,7 +45,28 @@ export default async function handler(req, res) {
         }
         const lookupData = await lookupResponse.json();
         const lookupRecords = lookupData.data || [];
-        // Transform to friendly format
+        
+        // Return full records if requested (for product selector)
+        if (returnFullData) {
+            const processedRecords = lookupRecords.map(record => {
+                const flat = { id: record.id };
+                Object.entries(mapping).forEach(([name, id]) => {
+                    if (record.fields[id] !== undefined) {
+                        flat[name] = record.fields[id];
+                    }
+                });
+                return flat;
+            });
+            
+            res.status(200).json({
+                success: true,
+                data: processedRecords,
+                count: processedRecords.length
+            });
+            return;
+        }
+        
+        // Default: Return lookup map keyed by Product Code (for order form)
         const lookupMap = {};
         lookupRecords.forEach(record => {
             const code = record.fields[mapping['Product Code']];
@@ -54,6 +81,7 @@ export default async function handler(req, res) {
                 };
             }
         });
+        
         res.status(200).json({
             success: true,
             data: lookupMap,
