@@ -77,7 +77,8 @@ export default async function handler(req, res) {
                     PiecesPerBox: record.fields[mapping['Pieces Per Box']] || 0,
                     'Sales Code': record.fields[mapping['Sales Code']] || '',
                     JigID: record.fields[mapping['JigID']] || '',
-                    BackJigID: record.fields[mapping['BackJigID']] || ''
+                    BackJigID: record.fields[mapping['BackJigID']] || '',
+                    PdfSectionStyle: record.fields[mapping['PdfSectionStyle']] || 'Products'
                 };
             }
         });
