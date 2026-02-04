@@ -103,7 +103,10 @@ async function addProduct(req, res, tableId, setComponentsTableId) {
     'Packaging Requirement 1': 'Packaging Requirement 1',
     'Packaging Requirement 2': 'Packaging Requirement 2',
     'Packaging Requirement 3': 'Packaging Requirement 3',
-    'Bespoke Backing Design': 'Bespoke Backing'
+    'Bespoke Backing Design': 'Bespoke Backing',
+    'JigID': 'JigID',
+    'BackJigID': 'BackJigID',
+    'PdfSectionStyle': 'PdfSectionStyle'
   };
 
   Object.entries(fieldMappings).forEach(([formField, softrField]) => {
@@ -226,7 +229,10 @@ async function addProduct(req, res, tableId, setComponentsTableId) {
             'Backing': 'Backing',
             'Packaging Requirement 1': 'Packaging Requirement 1',
             'Packaging Requirement 2': 'Packaging Requirement 2',
-            'Packaging Requirement 3': 'Packaging Requirement 3'
+            'Packaging Requirement 3': 'Packaging Requirement 3',
+            'JigID': 'JigID',
+            'BackJigID': 'BackJigID',
+            'PdfSectionStyle': 'PdfSectionStyle'
           };
 
           Object.entries(componentMappings).forEach(([formField, softrField]) => {
@@ -318,7 +324,7 @@ async function addProduct(req, res, tableId, setComponentsTableId) {
 // ============================================
 async function updateProduct(req, res, tableId) {
   const { id } = req.query;
-  const { Design, 'Bespoke Backing': BespokeBacking } = req.body;
+  const { Design, 'Bespoke Backing': BespokeBacking, JigID, BackJigID, PdfSectionStyle } = req.body;
 
   if (!id) {
     return res.status(400).json({ success: false, error: 'Product ID is required' });
@@ -332,6 +338,15 @@ async function updateProduct(req, res, tableId) {
   console.log('New design:', Design);
   if (BespokeBacking !== undefined) {
     console.log('New bespoke backing:', BespokeBacking);
+  }
+  if (JigID !== undefined) {
+    console.log('New JigID:', JigID);
+  }
+  if (BackJigID !== undefined) {
+    console.log('New BackJigID:', BackJigID);
+  }
+  if (PdfSectionStyle !== undefined) {
+    console.log('New PdfSectionStyle:', PdfSectionStyle);
   }
 
   // Get table schema to find field IDs
@@ -369,6 +384,21 @@ async function updateProduct(req, res, tableId) {
   // Add Bespoke Backing if provided
   if (BespokeBacking !== undefined && mapping['Bespoke Backing']) {
     updateFields[mapping['Bespoke Backing']] = BespokeBacking.trim();
+  }
+
+  // Add JigID if provided
+  if (JigID !== undefined && mapping['JigID']) {
+    updateFields[mapping['JigID']] = JigID.trim();
+  }
+
+  // Add BackJigID if provided
+  if (BackJigID !== undefined && mapping['BackJigID']) {
+    updateFields[mapping['BackJigID']] = BackJigID.trim();
+  }
+
+  // Add PdfSectionStyle if provided
+  if (PdfSectionStyle !== undefined && mapping['PdfSectionStyle']) {
+    updateFields[mapping['PdfSectionStyle']] = PdfSectionStyle.trim();
   }
 
   const updateData = { fields: updateFields };
