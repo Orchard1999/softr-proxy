@@ -120,6 +120,11 @@ async function addProduct(req, res, tableId, setComponentsTableId) {
     softrRecord[fieldMap['Is_Set']] = isSet;
   }
 
+  // Add Set_Size field (number of components in the set)
+  if (isSet && setComponents.length > 0 && fieldMap['Set_Size']) {
+    softrRecord[fieldMap['Set_Size']] = setComponents.length;
+  }
+
   // Auto-generate Description field
   if (fieldMap['Description']) {
     const descParts = [];
@@ -153,6 +158,7 @@ async function addProduct(req, res, tableId, setComponentsTableId) {
 
   console.log('Creating record with fields:', Object.keys(softrRecord).length);
   console.log('Is Set:', isSet);
+  console.log('Set Size:', isSet ? setComponents.length : 'N/A');
   console.log('Set Components count:', setComponents.length);
 
   // Create record using Tables API
