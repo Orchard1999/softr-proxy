@@ -7,6 +7,38 @@ export default async function handler(req, res) {
 
     const TABLE_ID = "NRuw736MZMbayi"; // All Customer Products
     const SET_COMPONENTS_TABLE_ID = "OfhywH1KfcbZ7s"; // Set Components
+    const PAGE_SIZE = 3000;
+
+    // Helper: paginate through all records in a table
+    async function fetchAllRecords(tableId) {
+        let allRecords = [];
+        let offset = 0;
+        let hasMore = true;
+
+        while (hasMore) {
+            const resp = await fetch(
+                `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${tableId}/records?limit=${PAGE_SIZE}&offset=${offset}`,
+                { headers: { "Softr-Api-Key": process.env.SOFTR_API_KEY } }
+            );
+
+            if (!resp.ok) {
+                throw new Error(`Failed to fetch records from ${tableId} at offset ${offset}`);
+            }
+
+            const json = await resp.json();
+            const records = json.data || [];
+
+            allRecords = allRecords.concat(records);
+
+            if (records.length < PAGE_SIZE) {
+                hasMore = false;
+            } else {
+                offset += PAGE_SIZE;
+            }
+        }
+
+        return allRecords;
+    }
 
     try {
         // -----------------------------------------
@@ -33,29 +65,25 @@ export default async function handler(req, res) {
                 return res.status(400).json({ error: "customerName is required" });
             }
 
-            // Fetch products and set components in parallel
-            const [productsResp, setComponentsResp, setSchemaResp] = await Promise.all([
-                fetch(
-                    `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${TABLE_ID}/records?limit=3000`,
-                    { headers: { "Softr-Api-Key": process.env.SOFTR_API_KEY } }
-                ),
-                fetch(
-                    `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${SET_COMPONENTS_TABLE_ID}/records?limit=3000`,
-                    { headers: { "Softr-Api-Key": process.env.SOFTR_API_KEY } }
-                ),
-                fetch(
-                    `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${SET_COMPONENTS_TABLE_ID}`,
-                    { headers: { "Softr-Api-Key": process.env.SOFTR_API_KEY } }
-                )
+            // Fetch set components schema in parallel with paginated fetches
+            const setSchemaPromise = fetch(
+                `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${SET_COMPONENTS_TABLE_ID}`,
+                { headers: { "Softr-Api-Key": process.env.SOFTR_API_KEY } }
+            );
+
+            // Paginate through ALL products and set components in parallel
+            const [allProducts, allSetComponentRecords, setSchemaResp] = await Promise.all([
+                fetchAllRecords(TABLE_ID),
+                fetchAllRecords(SET_COMPONENTS_TABLE_ID),
+                setSchemaPromise
             ]);
 
-            const productsJson = await productsResp.json();
-            const raw = productsJson.data || [];
+            console.log(`Fetched ${allProducts.length} total product records`);
 
             const customerField = mapping["Customer Name"];
 
             // Filter and flatten products
-            const filtered = raw
+            const filtered = allProducts
                 .filter(r => r.fields[customerField] === customerName)
                 .map(record => {
                     const out = { id: record.id };
@@ -67,22 +95,21 @@ export default async function handler(req, res) {
                     return out;
                 });
 
+            console.log(`Found ${filtered.length} products for "${customerName}"`);
+
             // Process set components
             let setComponents = [];
-            
-            if (setComponentsResp.ok && setSchemaResp.ok) {
-                const setComponentsJson = await setComponentsResp.json();
+
+            if (setSchemaResp.ok) {
                 const setSchemaJson = await setSchemaResp.json();
-                
                 const setFields = setSchemaJson.data.fields || [];
                 const setMapping = {};
                 setFields.forEach(f => (setMapping[f.name] = f.id));
-                
+
                 const setCustomerField = setMapping["Customer Name"];
-                const rawSetComponents = setComponentsJson.data || [];
-                
+
                 // Filter and flatten set components
-                setComponents = rawSetComponents
+                setComponents = allSetComponentRecords
                     .filter(r => r.fields[setCustomerField] === customerName)
                     .map(record => {
                         const out = { id: record.id };
