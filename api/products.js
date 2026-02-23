@@ -9,6 +9,22 @@ export default async function handler(req, res) {
     const SET_COMPONENTS_TABLE_ID = "OfhywH1KfcbZ7s"; // Set Components
     const PAGE_SIZE = 3000;
 
+    // Helper: fetch with retry on 429 rate limiting
+    async function fetchWithRetry(url, options, maxRetries = 3) {
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            const resp = await fetch(url, options);
+
+            if (resp.status === 429 && attempt < maxRetries) {
+                const delay = Math.pow(2, attempt) * 500; // 500ms, 1s, 2s
+                console.log(`Rate limited (429), retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
+            }
+
+            return resp;
+        }
+    }
+
     // Helper: paginate through all records in a table
     async function fetchAllRecords(tableId) {
         let allRecords = [];
@@ -16,7 +32,7 @@ export default async function handler(req, res) {
         let hasMore = true;
 
         while (hasMore) {
-            const resp = await fetch(
+            const resp = await fetchWithRetry(
                 `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${tableId}/records?limit=${PAGE_SIZE}&offset=${offset}`,
                 { headers: { "Softr-Api-Key": process.env.SOFTR_API_KEY } }
             );
