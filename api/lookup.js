@@ -31,24 +31,37 @@ export default async function handler(req, res) {
             mapping[field.name] = field.id;
         });
         
-        // Get all lookup records
-        const lookupResponse = await fetch(
-            `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/3nHzao5WHtnaay/records?limit=3000`,
-            {
+        // Fetch ALL records with pagination
+        let allRecords = [];
+        let offset = null;
+        let pageCount = 0;
+
+        do {
+            let url = `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/3nHzao5WHtnaay/records?limit=100`;
+            if (offset) url += `&offset=${offset}`;
+
+            const response = await fetch(url, {
                 headers: {
                     'Softr-Api-Key': process.env.SOFTR_API_KEY
                 }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to fetch page ${pageCount + 1}`);
             }
-        );
-        if (!lookupResponse.ok) {
-            throw new Error('Failed to fetch lookup data');
-        }
-        const lookupData = await lookupResponse.json();
-        const lookupRecords = lookupData.data || [];
+
+            const data = await response.json();
+            const records = data.data || [];
+            allRecords = allRecords.concat(records);
+            offset = data.next_offset || data.offset || null;
+            pageCount++;
+
+            if (pageCount > 20) break;
+        } while (offset);
         
         // Return full records if requested (for product selector)
         if (returnFullData) {
-            const processedRecords = lookupRecords.map(record => {
+            const processedRecords = allRecords.map(record => {
                 const flat = { id: record.id };
                 Object.entries(mapping).forEach(([name, id]) => {
                     if (record.fields[id] !== undefined) {
@@ -58,17 +71,19 @@ export default async function handler(req, res) {
                 return flat;
             });
             
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
             res.status(200).json({
                 success: true,
                 data: processedRecords,
-                count: processedRecords.length
+                count: processedRecords.length,
+                pages: pageCount
             });
             return;
         }
         
         // Default: Return lookup map keyed by Product Code (for order form)
         const lookupMap = {};
-        lookupRecords.forEach(record => {
+        allRecords.forEach(record => {
             const code = record.fields[mapping['Product Code']];
             if (code) {
                 lookupMap[code.trim()] = {
@@ -83,10 +98,13 @@ export default async function handler(req, res) {
             }
         });
         
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
         res.status(200).json({
             success: true,
             data: lookupMap,
-            count: Object.keys(lookupMap).length
+            count: Object.keys(lookupMap).length,
+            totalRecords: allRecords.length,
+            pages: pageCount
         });
     } catch (error) {
         console.error('Error:', error);
