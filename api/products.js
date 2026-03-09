@@ -7,7 +7,6 @@ export default async function handler(req, res) {
 
     const TABLE_ID = "NRuw736MZMbayi"; // All Customer Products
     const SET_COMPONENTS_TABLE_ID = "OfhywH1KfcbZ7s"; // Set Components
-    const PAGE_SIZE = 3000;
 
     // Helper: fetch with retry on 429 rate limiting
     async function fetchWithRetry(url, options, maxRetries = 3) {
@@ -15,7 +14,7 @@ export default async function handler(req, res) {
             const resp = await fetch(url, options);
 
             if (resp.status === 429 && attempt < maxRetries) {
-                const delay = Math.pow(2, attempt) * 500; // 500ms, 1s, 2s
+                const delay = Math.pow(2, attempt) * 500;
                 console.log(`Rate limited (429), retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
                 await new Promise(resolve => setTimeout(resolve, delay));
                 continue;
@@ -25,15 +24,15 @@ export default async function handler(req, res) {
         }
     }
 
-    // Helper: paginate through all records in a table
+    // Helper: paginate through all records using metadata.total
     async function fetchAllRecords(tableId) {
         let allRecords = [];
         let offset = 0;
-        let hasMore = true;
+        let total = Infinity;
 
-        while (hasMore) {
+        while (offset < total) {
             const resp = await fetchWithRetry(
-                `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${tableId}/records?limit=${PAGE_SIZE}&offset=${offset}`,
+                `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${tableId}/records?limit=100&offset=${offset}`,
                 { headers: { "Softr-Api-Key": process.env.SOFTR_API_KEY } }
             );
 
@@ -43,14 +42,12 @@ export default async function handler(req, res) {
 
             const json = await resp.json();
             const records = json.data || [];
-
             allRecords = allRecords.concat(records);
 
-            if (records.length < PAGE_SIZE) {
-                hasMore = false;
-            } else {
-                offset += PAGE_SIZE;
-            }
+            total = json.metadata?.total || records.length;
+            offset += 100;
+
+            if (offset > 10000) break; // safety cap
         }
 
         return allRecords;
