@@ -20,36 +20,80 @@ export default async function handler(req, res) {
     });
   }
 
-  // Helper: paginate through all records using metadata.total
+  // Helper: fetch with retry on 429 rate limiting
+  async function fetchWithRetry(url, options, maxRetries = 3) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const resp = await fetch(url, options);
+      if (resp.status === 429 && attempt < maxRetries) {
+        const delay = Math.pow(2, attempt) * 500;
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      return resp;
+    }
+  }
+
+  // Helper: paginate through all records
   async function fetchAllRecords(tableId) {
     let allRecords = [];
     let offset = 0;
     let total = Infinity;
 
     while (offset < total) {
-      const resp = await fetch(
+      const resp = await fetchWithRetry(
         `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${tableId}/records?limit=100&offset=${offset}`,
-        {
-          headers: {
-            'Softr-Api-Key': process.env.SOFTR_API_KEY
-          }
-        }
+        { headers: { 'Softr-Api-Key': process.env.SOFTR_API_KEY } }
       );
 
-      if (!resp.ok) {
-        throw new Error(`Failed to fetch records from ${tableId} at offset ${offset}`);
-      }
+      if (!resp.ok) throw new Error(`Failed to fetch records from ${tableId} at offset ${offset}`);
 
       const json = await resp.json();
       const records = json.data || [];
       allRecords = allRecords.concat(records);
-
       total = json.metadata?.total || records.length;
       offset += 100;
-
       if (offset > 50000) break;
     }
+    return allRecords;
+  }
 
+  // Helper: search records with filter
+  async function searchRecords(tableId, fieldId, value) {
+    let allRecords = [];
+    let offset = 0;
+    let total = Infinity;
+
+    while (offset < total) {
+      const resp = await fetchWithRetry(
+        `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${tableId}/records/search`,
+        {
+          method: 'POST',
+          headers: {
+            'Softr-Api-Key': process.env.SOFTR_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            filter: {
+              condition: {
+                leftSide: fieldId,
+                operator: "IS",
+                rightSide: value
+              }
+            },
+            paging: { offset: offset, limit: 100 }
+          })
+        }
+      );
+
+      if (!resp.ok) throw new Error(`Failed to search records from ${tableId} at offset ${offset}`);
+
+      const json = await resp.json();
+      const records = json.data || [];
+      allRecords = allRecords.concat(records);
+      total = json.metadata?.total || records.length;
+      offset += 100;
+      if (offset > 10000) break;
+    }
     return allRecords;
   }
 
@@ -59,32 +103,22 @@ export default async function handler(req, res) {
     
     console.log('Looking up price list:', priceListId);
 
-    // Step 1: Get Price Lists schema and records
+    // Step 1: Get Price Lists schema and find matching price list
     const schemaResponse = await fetch(
       `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${priceListsTableId}`,
-      {
-        headers: {
-          'Softr-Api-Key': process.env.SOFTR_API_KEY
-        }
-      }
+      { headers: { 'Softr-Api-Key': process.env.SOFTR_API_KEY } }
     );
 
-    if (!schemaResponse.ok) {
-      throw new Error('Failed to fetch price lists schema');
-    }
+    if (!schemaResponse.ok) throw new Error('Failed to fetch price lists schema');
 
     const schemaData = await schemaResponse.json();
     const plFields = schemaData.data.fields || [];
-    
     const plFieldMap = {};
-    plFields.forEach(field => {
-      plFieldMap[field.name] = field.id;
-    });
+    plFields.forEach(field => { plFieldMap[field.name] = field.id; });
 
-    // Fetch all price lists with pagination
+    // Fetch all price lists (small table, no need to search)
     const priceLists = await fetchAllRecords(priceListsTableId);
 
-    // Find the price list with matching Zigaflow ID
     const zigaflowIdField = plFieldMap['Zigaflow ID'];
     const nameField = plFieldMap['Name'];
 
@@ -108,51 +142,34 @@ export default async function handler(req, res) {
     // Step 2: Get Prices schema
     const pricesSchemaResponse = await fetch(
       `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${pricesTableId}`,
-      {
-        headers: {
-          'Softr-Api-Key': process.env.SOFTR_API_KEY
-        }
-      }
+      { headers: { 'Softr-Api-Key': process.env.SOFTR_API_KEY } }
     );
 
-    if (!pricesSchemaResponse.ok) {
-      throw new Error('Failed to fetch prices schema');
-    }
+    if (!pricesSchemaResponse.ok) throw new Error('Failed to fetch prices schema');
 
     const pricesSchemaData = await pricesSchemaResponse.json();
     const pricesFields = pricesSchemaData.data.fields || [];
-    
     const pricesFieldMap = {};
-    pricesFields.forEach(field => {
-      pricesFieldMap[field.name] = field.id;
-    });
+    pricesFields.forEach(field => { pricesFieldMap[field.name] = field.id; });
 
-    // Step 3: Fetch all prices with pagination
-    const allPrices = await fetchAllRecords(pricesTableId);
-
-    console.log('Total prices fetched:', allPrices.length);
-
-    // Filter prices for this price list and build lookup object
     const itemCodeField = pricesFieldMap['ItemCode'];
     const priceListField = pricesFieldMap['PriceList'];
     const priceField = pricesFieldMap['Price'];
 
+    // Step 3: Search for only this price list's prices (instead of fetching all 2200+)
+    const matchingPrices = await searchRecords(pricesTableId, priceListField, priceListName);
+
+    console.log('Prices found for', priceListName + ':', matchingPrices.length);
+
+    // Build lookup object
     const prices = {};
-    
-    allPrices.forEach(priceRecord => {
-      const recordPriceList = priceRecord.fields[priceListField];
-      
-      if (recordPriceList === priceListName) {
-        const itemCode = priceRecord.fields[itemCodeField];
-        const price = parseFloat(priceRecord.fields[priceField]) || 0;
-        
-        if (itemCode) {
-          prices[itemCode] = price;
-        }
+    matchingPrices.forEach(priceRecord => {
+      const itemCode = priceRecord.fields[itemCodeField];
+      const price = parseFloat(priceRecord.fields[priceField]) || 0;
+      if (itemCode) {
+        prices[itemCode] = price;
       }
     });
-
-    console.log('Prices found for', priceListName + ':', Object.keys(prices).length);
 
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     return res.status(200).json({
@@ -160,7 +177,6 @@ export default async function handler(req, res) {
       priceListId: priceListId,
       priceListName: priceListName,
       priceCount: Object.keys(prices).length,
-      totalRecords: allPrices.length,
       prices: prices
     });
 
