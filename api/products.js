@@ -24,7 +24,7 @@ export default async function handler(req, res) {
         }
     }
 
-    // Helper: paginate through all records using metadata.total
+    // Helper: paginate through all records using metadata.total (used for set components)
     async function fetchAllRecords(tableId) {
         let allRecords = [];
         let offset = 0;
@@ -48,6 +48,54 @@ export default async function handler(req, res) {
             offset += 100;
 
             if (offset > 50000) break; // safety cap
+        }
+
+        return allRecords;
+    }
+
+    // Helper: search records with filter (used for products - much faster than fetching all)
+    async function searchRecords(tableId, fieldId, value) {
+        let allRecords = [];
+        let offset = 0;
+        let total = Infinity;
+
+        while (offset < total) {
+            const resp = await fetchWithRetry(
+                `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${tableId}/records/search`,
+                {
+                    method: 'POST',
+                    headers: {
+                        "Softr-Api-Key": process.env.SOFTR_API_KEY,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        filter: {
+                            condition: {
+                                leftSide: fieldId,
+                                operator: "IS",
+                                rightSide: value
+                            }
+                        },
+                        paging: {
+                            offset: offset,
+                            limit: 100
+                        }
+                    })
+                }
+            );
+
+            if (!resp.ok) {
+                throw new Error(`Failed to search records from ${tableId} at offset ${offset}`);
+            }
+
+            const json = await resp.json();
+            const records = json.data || [];
+            allRecords = allRecords.concat(records);
+
+            total = json.metadata?.total || records.length;
+            offset += 100;
+
+            if (offset > 10000) break; // safety cap
         }
 
         return allRecords;
@@ -78,37 +126,33 @@ export default async function handler(req, res) {
                 return res.status(400).json({ error: "customerName is required" });
             }
 
-            // Fetch set components schema in parallel with paginated fetches
+            const customerField = mapping["Customer Name"];
+
+            // Fetch set components schema in parallel with filtered searches
             const setSchemaPromise = fetch(
                 `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${SET_COMPONENTS_TABLE_ID}`,
                 { headers: { "Softr-Api-Key": process.env.SOFTR_API_KEY } }
             );
 
-            // Paginate through ALL products and set components in parallel
-            const [allProducts, allSetComponentRecords, setSchemaResp] = await Promise.all([
-                fetchAllRecords(TABLE_ID),
+            // Search for only this customer's products (instead of fetching all 10000+)
+            const [customerProducts, allSetComponentRecords, setSchemaResp] = await Promise.all([
+                searchRecords(TABLE_ID, customerField, customerName),
                 fetchAllRecords(SET_COMPONENTS_TABLE_ID),
                 setSchemaPromise
             ]);
 
-            console.log(`Fetched ${allProducts.length} total product records`);
+            console.log(`Found ${customerProducts.length} products for "${customerName}" via search`);
 
-            const customerField = mapping["Customer Name"];
-
-            // Filter and flatten products
-            const filtered = allProducts
-                .filter(r => r.fields[customerField] === customerName)
-                .map(record => {
-                    const out = { id: record.id };
-                    Object.entries(mapping).forEach(([name, id]) => {
-                        if (record.fields[id] !== undefined) {
-                            out[name] = record.fields[id];
-                        }
-                    });
-                    return out;
+            // Flatten products
+            const filtered = customerProducts.map(record => {
+                const out = { id: record.id };
+                Object.entries(mapping).forEach(([name, id]) => {
+                    if (record.fields[id] !== undefined) {
+                        out[name] = record.fields[id];
+                    }
                 });
-
-            console.log(`Found ${filtered.length} products for "${customerName}"`);
+                return out;
+            });
 
             // Process set components
             let setComponents = [];
@@ -135,13 +179,12 @@ export default async function handler(req, res) {
                     });
             }
 
-             res.setHeader('Cache-Control', 'no-store');
+            res.setHeader('Cache-Control', 'no-store');
             return res.status(200).json({
                 success: true,
                 data: filtered,
                 setComponents: setComponents,
-                count: filtered.length,
-                totalRecords: allProducts.length
+                count: filtered.length
             });
         }
 
