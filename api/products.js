@@ -47,7 +47,7 @@ export default async function handler(req, res) {
             total = json.metadata?.total || records.length;
             offset += 100;
 
-            if (offset > 10000) break; // safety cap
+            if (offset > 50000) break; // safety cap
         }
 
         return allRecords;
