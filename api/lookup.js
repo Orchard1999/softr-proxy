@@ -63,7 +63,13 @@ export default async function handler(req, res) {
         
         // Return full records if requested (for product selector)
         if (returnFullData) {
-            const processedRecords = allRecords.map(record => {
+            const processedRecords = allRecords
+                .filter(record => {
+                    // Exclude restricted products from the catalogue browser
+                    const restricted = record.fields[mapping['Restricted']];
+                    return !restricted;
+                })
+                .map(record => {
                 const flat = { id: record.id };
                 Object.entries(mapping).forEach(([name, id]) => {
                     if (record.fields[id] !== undefined) {
