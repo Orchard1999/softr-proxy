@@ -1,5 +1,7 @@
 // Product Admin - Combined add, update, delete operations
-// POST = add product (with optional Set_Components)
+// POST = add product(s)
+//        - single object  -> adds one product (with optional Set_Components)  [unchanged behaviour]
+//        - { products: [] } or a raw array -> batch add, schema fetched ONCE, per-item results
 // PUT = update product
 // DELETE = delete product
 
@@ -17,7 +19,6 @@ export default async function handler(req, res) {
   const SET_COMPONENTS_TABLE_ID = 'OfhywH1KfcbZ7s';
 
   try {
-    // Route based on HTTP method
     switch (req.method) {
       case 'POST':
         return await addProduct(req, res, PRODUCT_TABLE_ID, SET_COMPONENTS_TABLE_ID);
@@ -30,63 +31,160 @@ export default async function handler(req, res) {
     }
   } catch (error) {
     console.error('Error:', error);
-    return res.status(500).json({ 
+    return res.status(500).json({
       success: false,
-      error: error.message 
+      error: error.message
     });
   }
 }
 
 // ============================================
-// ADD PRODUCT (POST) - Using Tables API
-// Now supports Set_Components for boxed sets
+// Helper: fetch with retry on 429 rate limiting
 // ============================================
-async function addProduct(req, res, tableId, setComponentsTableId) {
-  console.log('=== ADD PRODUCT REQUEST ===');
-  console.log('Body:', JSON.stringify(req.body, null, 2));
-
-  const productData = req.body;
-  const setComponents = productData.Set_Components || [];
-  const isSet = productData.Is_Set === true;
-
-  // Validate required fields
-  if (!productData['Customer Name']) {
-    throw new Error('Customer Name is required');
-  }
-  if (!productData['Product Code']) {
-    throw new Error('Product Code is required');
-  }
-  if (!productData['Design']) {
-    throw new Error('Design is required');
-  }
-
-  // Get table schema to get field IDs (using Tables API)
-  console.log('Fetching field IDs from Tables API...');
-  const schemaResponse = await fetch(
-    `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${tableId}`,
-    {
-      headers: {
-        'Softr-Api-Key': process.env.SOFTR_API_KEY
-      }
+async function fetchWithRetry(url, options, maxRetries = 3) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const resp = await fetch(url, options);
+    if (resp.status === 429 && attempt < maxRetries) {
+      const delay = Math.pow(2, attempt) * 500;
+      console.log(`Rate limited (429), retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      continue;
     }
+    return resp;
+  }
+}
+
+// ============================================
+// Helper: fetch a table schema and return { name: fieldId } map
+// ============================================
+async function getFieldMap(tableId) {
+  const resp = await fetchWithRetry(
+    `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${tableId}`,
+    { headers: { 'Softr-Api-Key': process.env.SOFTR_API_KEY } }
   );
 
-  if (!schemaResponse.ok) {
-    const errorText = await schemaResponse.text();
-    console.error('Failed to get schema:', schemaResponse.status, errorText);
-    throw new Error(`Failed to get field IDs: ${schemaResponse.status}`);
+  if (!resp.ok) {
+    const errorText = await resp.text();
+    console.error('Failed to get schema:', resp.status, errorText);
+    throw new Error(`Failed to get field IDs: ${resp.status}`);
   }
 
-  const schemaData = await schemaResponse.json();
-  const fields = schemaData.data.fields || [];
-  
-  // Create field name to ID mapping
-  const fieldMap = {};
-  fields.forEach(field => {
-    fieldMap[field.name] = field.id;
-  });
+  const data = await resp.json();
+  const fields = data.data.fields || [];
+  const map = {};
+  fields.forEach(field => { map[field.name] = field.id; });
+  return map;
+}
 
+// ============================================
+// ADD PRODUCT(S) (POST)
+// Detects single vs batch. Fetches schema once.
+// ============================================
+async function addProduct(req, res, tableId, setComponentsTableId) {
+  const body = req.body;
+
+  // Normalise into a list of product objects, remembering whether this was a batch call
+  const isBatch = Array.isArray(body) || (body && Array.isArray(body.products));
+  const items = Array.isArray(body)
+    ? body
+    : (body && Array.isArray(body.products) ? body.products : [body]);
+
+  if (!items || items.length === 0) {
+    return res.status(400).json({ success: false, error: 'No products provided' });
+  }
+
+  console.log(`=== ADD PRODUCT REQUEST === (${isBatch ? 'batch of ' + items.length : 'single'})`);
+
+  // Fetch the product table schema ONCE for the whole request
+  const fieldMap = await getFieldMap(tableId);
   console.log('✅ Got field mapping:', Object.keys(fieldMap).length, 'fields');
+
+  // Fetch the Set_Components schema once, only if any item is a set
+  const anySets = items.some(p =>
+    p && p.Is_Set === true && Array.isArray(p.Set_Components) && p.Set_Components.length > 0
+  );
+  let setFieldMap = null;
+  if (anySets) {
+    try {
+      setFieldMap = await getFieldMap(setComponentsTableId);
+      console.log('✅ Got Set_Components field mapping:', Object.keys(setFieldMap).length, 'fields');
+    } catch (e) {
+      console.error('Failed to get Set_Components schema, sets will be created without components:', e.message);
+      setFieldMap = null;
+    }
+  }
+
+  // Process each product sequentially (keeps API load steady, gives clean per-item results)
+  const results = [];
+  for (const productData of items) {
+    try {
+      const created = await createProductRecord(
+        productData, fieldMap, setFieldMap, tableId, setComponentsTableId
+      );
+      results.push({
+        design: productData && productData.Design,
+        success: true,
+        isSet: created.isSet,
+        componentsCreated: created.componentsCreated,
+        record: created.record
+      });
+    } catch (err) {
+      console.error('Failed to add "' + (productData && productData.Design) + '":', err.message);
+      results.push({
+        design: productData && productData.Design,
+        success: false,
+        error: err.message
+      });
+    }
+  }
+
+  // ---- Single call: preserve the original response shape exactly ----
+  if (!isBatch) {
+    const r = results[0];
+    if (!r.success) {
+      return res.status(500).json({ success: false, error: r.error });
+    }
+    return res.status(200).json({
+      success: true,
+      message: r.isSet
+        ? `Set added to catalogue with ${r.componentsCreated} components`
+        : 'Product added to catalogue successfully',
+      record: r.record,
+      componentsCreated: r.componentsCreated
+    });
+  }
+
+  // ---- Batch call: return per-item results ----
+  const succeeded = results.filter(r => r.success);
+  const failed = results.filter(r => !r.success);
+  const statusCode = (failed.length > 0 && succeeded.length === 0) ? 500 : 200;
+
+  return res.status(statusCode).json({
+    success: failed.length === 0,
+    total: results.length,
+    created: succeeded.length,
+    failedCount: failed.length,
+    results: results.map(r => ({
+      design: r.design,
+      success: r.success,
+      componentsCreated: r.componentsCreated,
+      error: r.error
+    }))
+  });
+}
+
+// ============================================
+// Create a single product record (+ set components).
+// Throws on failure so the caller can record it per-item.
+// ============================================
+async function createProductRecord(productData, fieldMap, setFieldMap, tableId, setComponentsTableId) {
+  const setComponents = (productData && productData.Set_Components) || [];
+  const isSet = productData && productData.Is_Set === true;
+
+  // Validate required fields
+  if (!productData || !productData['Customer Name']) throw new Error('Customer Name is required');
+  if (!productData['Product Code']) throw new Error('Product Code is required');
+  if (!productData['Design']) throw new Error('Design is required');
 
   // Map incoming data to Softr field structure
   const softrRecord = {};
@@ -115,17 +213,17 @@ async function addProduct(req, res, tableId, setComponentsTableId) {
     }
   });
 
-  // Add Is_Set field
+  // Is_Set
   if (fieldMap['Is_Set']) {
     softrRecord[fieldMap['Is_Set']] = isSet;
   }
 
-  // Add Set_Size field (number of components in the set)
+  // Set_Size
   if (isSet && setComponents.length > 0 && fieldMap['Set_Size']) {
     softrRecord[fieldMap['Set_Size']] = setComponents.length;
   }
 
-  // Auto-generate Description field
+  // Auto-generate Description
   if (fieldMap['Description']) {
     const descParts = [];
     if (productData['Product Range']) descParts.push(productData['Product Range']);
@@ -156,13 +254,8 @@ async function addProduct(req, res, tableId, setComponentsTableId) {
     softrRecord[fieldMap['JoinedName']] = joinedParts.join('');
   }
 
-  console.log('Creating record with fields:', Object.keys(softrRecord).length);
-  console.log('Is Set:', isSet);
-  console.log('Set Size:', isSet ? setComponents.length : 'N/A');
-  console.log('Set Components count:', setComponents.length);
-
-  // Create record using Tables API
-  const createResponse = await fetch(
+  // Create the product record
+  const createResponse = await fetchWithRetry(
     `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${tableId}/records`,
     {
       method: 'POST',
@@ -176,157 +269,111 @@ async function addProduct(req, res, tableId, setComponentsTableId) {
 
   if (!createResponse.ok) {
     const errorText = await createResponse.text();
-    console.error('Failed to create record:', createResponse.status, errorText);
     throw new Error(`Failed to create record: ${createResponse.status} - ${errorText}`);
   }
 
   const createdRecord = await createResponse.json();
-  console.log('✅ Product added successfully');
+  console.log('✅ Product added:', productData['Design']);
 
-  // ============================================
-  // CREATE SET COMPONENTS (if this is a set)
-  // ============================================
+  // Create set components (if applicable and schema available)
   let componentsCreated = 0;
 
-  if (isSet && setComponents.length > 0) {
-    console.log('=== CREATING SET COMPONENTS ===');
-    
-    // Get Set_Components table schema
-    const setSchemaResponse = await fetch(
-      `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${setComponentsTableId}`,
-      {
-        headers: {
-          'Softr-Api-Key': process.env.SOFTR_API_KEY
+  if (isSet && setComponents.length > 0 && setFieldMap) {
+    for (const component of setComponents) {
+      try {
+        const componentRecord = {};
+
+        const componentMappings = {
+          'Design': 'Design',
+          'Qty_Per_Set': 'Qty_Per_Set',
+          'Set_Description': 'Set_Description',
+          'Customer Name': 'Customer Name',
+          'Product Code': 'Product Code',
+          'Product Range': 'Product Range',
+          'Size': 'Size',
+          'Thickness': 'Thickness',
+          'Finish': 'Finish',
+          'Backing': 'Backing',
+          'Packaging Requirement 1': 'Packaging Requirement 1',
+          'Packaging Requirement 2': 'Packaging Requirement 2',
+          'Packaging Requirement 3': 'Packaging Requirement 3',
+          'JigID': 'JigID',
+          'BackJigID': 'BackJigID',
+          'PdfSectionStyle': 'PdfSectionStyle'
+        };
+
+        Object.entries(componentMappings).forEach(([formField, softrField]) => {
+          if (component[formField] !== undefined && setFieldMap[softrField]) {
+            componentRecord[setFieldMap[softrField]] = component[formField];
+          }
+        });
+
+        // Auto-generate Design Description for component
+        if (setFieldMap['Design Description']) {
+          const compDescParts = [component['Design']];
+          if (component['Product Range']) compDescParts.push(component['Product Range']);
+          if (component['Size']) compDescParts.push(component['Size']);
+          if (component['Finish']) compDescParts.push(component['Finish']);
+          if (component['Backing']) compDescParts.push(component['Backing']);
+          compDescParts.push(component['Customer Name']);
+          componentRecord[setFieldMap['Design Description']] = compDescParts.join(' - ');
         }
-      }
-    );
 
-    if (!setSchemaResponse.ok) {
-      console.error('Failed to get Set_Components schema, but product was created');
-      // Don't throw - product was created successfully
-    } else {
-      const setSchemaData = await setSchemaResponse.json();
-      const setFields = setSchemaData.data.fields || [];
-      
-      // Create field name to ID mapping for Set_Components
-      const setFieldMap = {};
-      setFields.forEach(field => {
-        setFieldMap[field.name] = field.id;
-      });
-
-      console.log('✅ Got Set_Components field mapping:', Object.keys(setFieldMap).length, 'fields');
-
-      // Create each component record
-      for (const component of setComponents) {
-        try {
-          const componentRecord = {};
-
-          // Map component fields to Softr field IDs
-          const componentMappings = {
-            'Design': 'Design',
-            'Qty_Per_Set': 'Qty_Per_Set',
-            'Set_Description': 'Set_Description',
-            'Customer Name': 'Customer Name',
-            'Product Code': 'Product Code',
-            'Product Range': 'Product Range',
-            'Size': 'Size',
-            'Thickness': 'Thickness',
-            'Finish': 'Finish',
-            'Backing': 'Backing',
-            'Packaging Requirement 1': 'Packaging Requirement 1',
-            'Packaging Requirement 2': 'Packaging Requirement 2',
-            'Packaging Requirement 3': 'Packaging Requirement 3',
-            'JigID': 'JigID',
-            'BackJigID': 'BackJigID',
-            'PdfSectionStyle': 'PdfSectionStyle'
-          };
-
-          Object.entries(componentMappings).forEach(([formField, softrField]) => {
-            if (component[formField] !== undefined && setFieldMap[softrField]) {
-              componentRecord[setFieldMap[softrField]] = component[formField];
-            }
-          });
-
-          // Auto-generate Design Description for component
-          if (setFieldMap['Design Description']) {
-            const compDescParts = [component['Design']];
-            if (component['Product Range']) compDescParts.push(component['Product Range']);
-            if (component['Size']) compDescParts.push(component['Size']);
-            if (component['Finish']) compDescParts.push(component['Finish']);
-            if (component['Backing']) compDescParts.push(component['Backing']);
-            compDescParts.push(component['Customer Name']);
-            componentRecord[setFieldMap['Design Description']] = compDescParts.join(' - ');
-          }
-
-          // Auto-generate Description for component
-          if (setFieldMap['Description']) {
-            const descParts = [];
-            if (component['Product Range']) descParts.push(component['Product Range']);
-            if (component['Size']) descParts.push(component['Size']);
-            if (component['Finish']) descParts.push(component['Finish']);
-            if (component['Backing']) descParts.push(component['Backing']);
-            componentRecord[setFieldMap['Description']] = descParts.join(', ');
-          }
-
-          // Auto-generate JoinedName for component
-          if (setFieldMap['JoinedName']) {
-            const joinedParts = [];
-            if (component['Product Range']) joinedParts.push(component['Product Range'].replace(/\s/g, ''));
-            if (component['Size']) joinedParts.push(component['Size'].replace(/\s/g, ''));
-            if (component['Finish']) joinedParts.push(component['Finish'].replace(/\s/g, ''));
-            if (component['Backing']) joinedParts.push(component['Backing'].replace(/\s/g, ''));
-            componentRecord[setFieldMap['JoinedName']] = joinedParts.join('');
-          }
-
-          // Set Is_Set to true for components as well (if field exists)
-          if (setFieldMap['Is_Set']) {
-            componentRecord[setFieldMap['Is_Set']] = true;
-          }
-
-          console.log('Creating component:', component['Design']);
-
-          const componentResponse = await fetch(
-            `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${setComponentsTableId}/records`,
-            {
-              method: 'POST',
-              headers: {
-                'Softr-Api-Key': process.env.SOFTR_API_KEY,
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({ fields: componentRecord })
-            }
-          );
-
-          if (!componentResponse.ok) {
-            const errorText = await componentResponse.text();
-            console.error('Failed to create component:', component['Design'], errorText);
-            // Continue with other components even if one fails
-          } else {
-            componentsCreated++;
-            console.log('✅ Component created:', component['Design']);
-          }
-        } catch (compError) {
-          console.error('Error creating component:', component['Design'], compError.message);
-          // Continue with other components
+        // Auto-generate Description for component
+        if (setFieldMap['Description']) {
+          const descParts = [];
+          if (component['Product Range']) descParts.push(component['Product Range']);
+          if (component['Size']) descParts.push(component['Size']);
+          if (component['Finish']) descParts.push(component['Finish']);
+          if (component['Backing']) descParts.push(component['Backing']);
+          componentRecord[setFieldMap['Description']] = descParts.join(', ');
         }
-      }
 
-      console.log(`✅ Created ${componentsCreated}/${setComponents.length} components`);
+        // Auto-generate JoinedName for component
+        if (setFieldMap['JoinedName']) {
+          const joinedParts = [];
+          if (component['Product Range']) joinedParts.push(component['Product Range'].replace(/\s/g, ''));
+          if (component['Size']) joinedParts.push(component['Size'].replace(/\s/g, ''));
+          if (component['Finish']) joinedParts.push(component['Finish'].replace(/\s/g, ''));
+          if (component['Backing']) joinedParts.push(component['Backing'].replace(/\s/g, ''));
+          componentRecord[setFieldMap['JoinedName']] = joinedParts.join('');
+        }
+
+        // Is_Set on the component
+        if (setFieldMap['Is_Set']) {
+          componentRecord[setFieldMap['Is_Set']] = true;
+        }
+
+        const componentResponse = await fetchWithRetry(
+          `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${setComponentsTableId}/records`,
+          {
+            method: 'POST',
+            headers: {
+              'Softr-Api-Key': process.env.SOFTR_API_KEY,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ fields: componentRecord })
+          }
+        );
+
+        if (componentResponse.ok) {
+          componentsCreated++;
+        } else {
+          const errorText = await componentResponse.text();
+          console.error('Failed to create component:', component['Design'], errorText);
+        }
+      } catch (compError) {
+        console.error('Error creating component:', component['Design'], compError.message);
+      }
     }
+    console.log(`✅ Created ${componentsCreated}/${setComponents.length} components for "${productData['Design']}"`);
   }
 
-  return res.status(200).json({
-    success: true,
-    message: isSet 
-      ? `Set added to catalogue with ${componentsCreated} components` 
-      : 'Product added to catalogue successfully',
-    record: createdRecord,
-    componentsCreated: componentsCreated
-  });
+  return { record: createdRecord, componentsCreated, isSet };
 }
 
 // ============================================
-// UPDATE PRODUCT (PUT)
+// UPDATE PRODUCT (PUT)  — unchanged
 // ============================================
 async function updateProduct(req, res, tableId) {
   const { id } = req.query;
@@ -342,27 +389,14 @@ async function updateProduct(req, res, tableId) {
 
   console.log('Updating product:', id);
   console.log('New design:', Design);
-  if (BespokeBacking !== undefined) {
-    console.log('New bespoke backing:', BespokeBacking);
-  }
-  if (JigID !== undefined) {
-    console.log('New JigID:', JigID);
-  }
-  if (BackJigID !== undefined) {
-    console.log('New BackJigID:', BackJigID);
-  }
-  if (PdfSectionStyle !== undefined) {
-    console.log('New PdfSectionStyle:', PdfSectionStyle);
-  }
+  if (BespokeBacking !== undefined) console.log('New bespoke backing:', BespokeBacking);
+  if (JigID !== undefined) console.log('New JigID:', JigID);
+  if (BackJigID !== undefined) console.log('New BackJigID:', BackJigID);
+  if (PdfSectionStyle !== undefined) console.log('New PdfSectionStyle:', PdfSectionStyle);
 
-  // Get table schema to find field IDs
   const schemaResponse = await fetch(
     `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${tableId}`,
-    {
-      headers: {
-        'Softr-Api-Key': process.env.SOFTR_API_KEY
-      }
-    }
+    { headers: { 'Softr-Api-Key': process.env.SOFTR_API_KEY } }
   );
 
   if (!schemaResponse.ok) {
@@ -371,38 +405,28 @@ async function updateProduct(req, res, tableId) {
 
   const schemaData = await schemaResponse.json();
   const fields = schemaData.data.fields || [];
-  
+
   const mapping = {};
-  fields.forEach(field => {
-    mapping[field.name] = field.id;
-  });
+  fields.forEach(field => { mapping[field.name] = field.id; });
 
   const designFieldId = mapping['Design'];
   if (!designFieldId) {
     throw new Error('Design field not found in table');
   }
 
-  // Build update data
   const updateFields = {
     [designFieldId]: Design.trim()
   };
 
-  // Add Bespoke Backing if provided
   if (BespokeBacking !== undefined && mapping['Bespoke Backing']) {
     updateFields[mapping['Bespoke Backing']] = BespokeBacking.trim();
   }
-
-  // Add JigID if provided
   if (JigID !== undefined && mapping['JigID']) {
     updateFields[mapping['JigID']] = JigID.trim();
   }
-
-  // Add BackJigID if provided
   if (BackJigID !== undefined && mapping['BackJigID']) {
     updateFields[mapping['BackJigID']] = BackJigID.trim();
   }
-
-  // Add PdfSectionStyle if provided
   if (PdfSectionStyle !== undefined && mapping['PdfSectionStyle']) {
     updateFields[mapping['PdfSectionStyle']] = PdfSectionStyle.trim();
   }
@@ -437,7 +461,7 @@ async function updateProduct(req, res, tableId) {
 }
 
 // ============================================
-// DELETE PRODUCT (DELETE)
+// DELETE PRODUCT (DELETE)  — unchanged
 // ============================================
 async function deleteProduct(req, res, tableId) {
   const { id } = req.query;
@@ -452,9 +476,7 @@ async function deleteProduct(req, res, tableId) {
     `https://tables-api.softr.io/api/v1/databases/${process.env.SOFTR_DATABASE_ID}/tables/${tableId}/records/${id}`,
     {
       method: 'DELETE',
-      headers: {
-        'Softr-Api-Key': process.env.SOFTR_API_KEY
-      }
+      headers: { 'Softr-Api-Key': process.env.SOFTR_API_KEY }
     }
   );
 
